@@ -5,6 +5,7 @@ use std::io::Read;
 use std::io::Write;
 use tempfile::tempdir;
 use tokio::test;
+use uuid::Uuid;
 
 use rig::loaders::FileLoader;
 use rig::loaders::file::FileLoaderError;
@@ -17,9 +18,37 @@ use rig::{
     Embed,
 };
 
+use rig_qdrant::QdrantVectorStore;
+
+use qdrant_client::{
+    qdrant::{
+        CreateCollectionBuilder, Distance, PointStruct, QueryPointsBuilder, UpsertPointsBuilder,
+        VectorParamsBuilder,
+    },
+    Payload, Qdrant,
+};
+
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
+
+    // Qdrant set up
+        const COLLECTION_NAME: &str = "rig-collection";
+
+    let client = Qdrant::from_url("http://localhost:6334").build()?;
+
+    // Create a collection with 1536 dimensions if it doesn't exist
+    // Note: Make sure the dimensions match the size of the embeddings returned by the
+    // model you are using
+    if !client.collection_exists(COLLECTION_NAME).await? {
+        client
+            .create_collection(
+                CreateCollectionBuilder::new(COLLECTION_NAME)
+                    .vectors_config(VectorParamsBuilder::new(1536, Distance::Cosine)),
+            )
+            .await?;
+    }
+
     dotenv().ok(); // Load .env file into the environment
     let openai = openai::Client::from_env();
     let model = openai.embedding_model(TEXT_EMBEDDING_ADA_002);
@@ -39,11 +68,38 @@ async fn main() -> Result<(), anyhow::Error> {
         }
     }).collect();
 
-        // Create embeddings for the loaded documents
+    // Create embeddings for the loaded documents
     let documents_with_embeddings = EmbeddingsBuilder::new(model.clone())
         .documents(documents)?
         .build()
         .await?;
+
+    // Now, use the `documents_with_embeddings` for the PointStruct mapping
+     let points: Vec<PointStruct> = documents_with_embeddings
+    .into_iter()
+    .map(|(d, embeddings)| {
+        let vec: Vec<f32> = embeddings.first().vec.iter().map(|&x| x as f32).collect();
+        
+        // Generate a new unique ID using UUID and convert it to a String
+        let id = Uuid::new_v4().to_string();  // Convert UUID to String
+
+        // Create the payload
+        let payload = Payload::try_from(serde_json::to_value(&d).unwrap()).unwrap();
+
+        PointStruct::new(id, vec, payload)  // Pass the String as the id
+    })
+    .collect();
+
+// Upsert the points into Qdrant
+client
+    .upsert_points(UpsertPointsBuilder::new(COLLECTION_NAME, points))
+    .await?;
+
+// Prepare query parameters for Qdrant
+let query_params = QueryPointsBuilder::new(COLLECTION_NAME).with_payload(true);
+
+// Create the Qdrant vector store
+let vector_store = QdrantVectorStore::new(client, model, query_params.build());
 
     Ok(())
 }
