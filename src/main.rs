@@ -1,5 +1,5 @@
+#![allow(unused)]
 use dotenv::dotenv;
-use rig::loaders::file::FileLoaderError;
 use std::fs::File;
 use std::io::Read;
 use std::io::Write;
@@ -7,21 +7,43 @@ use tempfile::tempdir;
 use tokio::test;
 
 use rig::loaders::FileLoader;
+use rig::loaders::file::FileLoaderError;
 
 use rig::{completion::Prompt, providers::openai};
+use rig::{
+    embeddings::EmbeddingsBuilder,
+    providers::openai::{Client, TEXT_EMBEDDING_ADA_002},
+    vector_store::VectorStoreIndex,
+    Embed,
+};
+
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     dotenv().ok(); // Load .env file into the environment
     let openai = openai::Client::from_env();
+    let model = openai.embedding_model(TEXT_EMBEDDING_ADA_002);
 
-    FileLoader::with_glob("docs/*.toml")?
-        .read()
-        .into_iter()
-        .for_each(|result| match result {
-            Ok(content) => println!("{}", content),
-            Err(e) => eprintln!("Error reading file: {}", e),
-        });
+        // Load documents from files
+    let glob_pattern = "docs/*.toml";
+    let files = FileLoader::with_glob(glob_pattern)?;
+
+        // Read the files and create Word struct for each document
+    let documents: Vec<_> = files.read().into_iter().filter_map(|result| {
+        match result {
+            Ok(content) => {
+                // Here you could map the content into your Word struct (e.g. parse TOML)
+                     Some("some_unique_id".to_string())
+            },
+            Err(_) =>None // Skip files that couldn't be loaded
+        }
+    }).collect();
+
+        // Create embeddings for the loaded documents
+    let documents_with_embeddings = EmbeddingsBuilder::new(model.clone())
+        .documents(documents)?
+        .build()
+        .await?;
 
     Ok(())
 }
